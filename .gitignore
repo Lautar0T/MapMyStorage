@@ -1,0 +1,10 @@
+bin/
+dist/
+.gocache/
+.gomodcache/
+coverage.out
+coverage.html
+*.log
+*.tmp
+.DS_Store
+Thumbs.db
