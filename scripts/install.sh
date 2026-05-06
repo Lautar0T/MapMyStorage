@@ -1,8 +1,8 @@
 #!/usr/bin/env sh
 set -eu
 
-BINARY_NAME="rdm-cli"
-REPO="lautaro/real-disk-map"
+BINARY_NAME="mapmystorage"
+REPO="lautar0t/MapMyStorage"
 INSTALL_DIR="${INSTALL_DIR:-/usr/local/bin}"
 
 fail() {
@@ -41,7 +41,7 @@ if [ -z "$VERSION" ]; then
 fi
 [ -n "$VERSION" ] || fail "could not resolve latest release version"
 
-ASSET="real-disk-map_${VERSION#v}_${OS}_${ARCH}.tar.gz"
+ASSET="MapMyStorage_${VERSION#v}_${OS}_${ARCH}.tar.gz"
 URL="https://github.com/$REPO/releases/download/$VERSION/$ASSET"
 TMP_DIR="$(mktemp -d)"
 trap 'rm -rf "$TMP_DIR"' EXIT

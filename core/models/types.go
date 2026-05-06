@@ -1,4 +1,4 @@
-// Package models provides the core data structures for real-disk-map.
+// Package models provides the core data structures for MapMyStorage.
 package models
 
 import (

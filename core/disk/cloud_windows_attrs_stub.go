@@ -5,7 +5,7 @@ package disk
 import (
 	"os"
 
-	"github.com/lautaro/real-disk-map/core/models"
+	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
 func detectWindowsCloudState(path string, info os.FileInfo) (models.CloudStatus, bool) {

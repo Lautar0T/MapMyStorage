@@ -1,6 +1,6 @@
-# real-disk-map
+# MapMyStorage
 
-`real-disk-map` is a cross-platform CLI for finding what is actually using disk space.
+`MapMyStorage` is a cross-platform CLI for finding what is actually using disk space.
 It reports allocated size, also known as physical size or size on disk, instead of only logical file size.
 
 This is useful for inspecting sparse files, compressed files, and cloud-storage placeholders that can appear huge logically while using little or no local disk space.
@@ -16,18 +16,18 @@ This is useful for inspecting sparse files, compressed files, and cloud-storage 
 
 ## Install
 
-Download a binary from the [latest GitHub release](https://github.com/lautaro/real-disk-map/releases/latest).
+Download a binary from the [latest GitHub release](https://github.com/lautar0t/MapMyStorage/releases/latest).
 
 macOS and Linux can also use the install script:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/lautaro/real-disk-map/main/scripts/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/lautar0t/MapMyStorage/main/scripts/install.sh | sh
 ```
 
 Or install from source with Go:
 
 ```sh
-go install github.com/lautaro/real-disk-map/cmd/rdm-cli@latest
+go install github.com/lautar0t/MapMyStorage/cmd/mapmystorage@latest
 ```
 
 Go 1.25 or newer is required.
@@ -37,27 +37,27 @@ Go 1.25 or newer is required.
 Start the interactive TUI:
 
 ```sh
-rdm-cli
-rdm-cli ~/Downloads
+mapmystorage
+mapmystorage ~/Downloads
 ```
 
 Export JSON or CSV:
 
 ```sh
-rdm-cli -json -root ~/Downloads > disk.json
-rdm-cli -csv -root ~/Downloads > disk.csv
+mapmystorage -json -root ~/Downloads > disk.json
+mapmystorage -csv -root ~/Downloads > disk.csv
 ```
 
 Run a non-interactive text summary:
 
 ```sh
-rdm-cli -no-interactive -root ~/Downloads
+mapmystorage -no-interactive -root ~/Downloads
 ```
 
 Filter scans:
 
 ```sh
-rdm-cli -exclude ".git,node_modules,*.tmp" -hidden -max-depth 4
+mapmystorage -exclude ".git,node_modules,*.tmp" -hidden -max-depth 4
 ```
 
 ## Options
@@ -104,15 +104,15 @@ Examples:
 - A compressed file may allocate less disk space than its logical size.
 - A cloud placeholder can report the remote file's logical size while using little local storage.
 
-`real-disk-map` ranks by physical size by default so the biggest entries are the ones actually consuming local disk.
+`MapMyStorage` ranks by physical size by default so the biggest entries are the ones actually consuming local disk.
 
 ## Build From Source
 
 ```sh
-git clone https://github.com/lautaro/real-disk-map.git
-cd real-disk-map
+git clone https://github.com/lautar0t/MapMyStorage.git
+cd MapMyStorage
 make build
-./bin/rdm-cli -version
+./bin/mapmystorage -version
 ```
 
 Useful development commands:

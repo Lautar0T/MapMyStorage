@@ -7,7 +7,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/lautaro/real-disk-map/core/models"
+	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
 // CloudDetector detects cloud storage files and their sync status.

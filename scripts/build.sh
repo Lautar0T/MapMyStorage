@@ -1,15 +1,15 @@
 #!/bin/bash
 
-# Build script for real-disk-map
+# Build script for MapMyStorage
 # Supports: macOS (amd64, arm64), Windows (amd64), Linux (amd64)
 
 set -e
 
-BINARY_NAME="rdm-cli"
+BINARY_NAME="mapmystorage"
 VERSION=${VERSION:-"0.2.0"}
 BUILD_DIR="bin"
 
-echo "=== real-disk-map Build Script ==="
+echo "=== MapMyStorage Build Script ==="
 echo "Version: $VERSION"
 echo ""
 
@@ -36,7 +36,7 @@ build_platform() {
     GOOS="$goos" GOARCH="$goarch" go build \
         -ldflags "-s -w -X main.version=$VERSION" \
         -o "$output" \
-        ./cmd/rdm-cli
+        ./cmd/mapmystorage
 
     echo "  -> $output"
 }
@@ -48,7 +48,7 @@ if [ $# -eq 0 ]; then
     go build \
         -ldflags "-s -w -X main.version=$VERSION" \
         -o "$BUILD_DIR/$BINARY_NAME" \
-        ./cmd/rdm-cli
+        ./cmd/mapmystorage
     echo "  -> $BUILD_DIR/$BINARY_NAME"
 else
     # Build for specified platforms

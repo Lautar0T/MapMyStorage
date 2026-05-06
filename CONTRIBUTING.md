@@ -1,6 +1,6 @@
 # Contributing
 
-Thanks for helping improve `real-disk-map`.
+Thanks for helping improve `MapMyStorage`.
 
 ## Requirements
 
@@ -18,7 +18,7 @@ make build
 Run the CLI locally:
 
 ```sh
-./bin/rdm-cli -no-interactive -root . -max-depth 1
+./bin/mapmystorage -no-interactive -root . -max-depth 1
 ```
 
 Before opening a pull request, run:

@@ -6,7 +6,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/lautaro/real-disk-map/core/models"
+	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
 // View renders the TUI.

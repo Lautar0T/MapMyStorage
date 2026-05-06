@@ -9,10 +9,10 @@ import (
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
-	"github.com/lautaro/real-disk-map/cmd/rdm-cli/tui"
-	"github.com/lautaro/real-disk-map/core/disk"
-	"github.com/lautaro/real-disk-map/core/export"
-	"github.com/lautaro/real-disk-map/core/models"
+	"github.com/lautar0t/MapMyStorage/cmd/mapmystorage/tui"
+	"github.com/lautar0t/MapMyStorage/core/disk"
+	"github.com/lautar0t/MapMyStorage/core/export"
+	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
 var version = "dev"
@@ -35,7 +35,7 @@ func main() {
 	flag.Parse()
 
 	if *showVersion {
-		fmt.Printf("real-disk-map version %s\n", version)
+		fmt.Printf("MapMyStorage version %s\n", version)
 		return
 	}
 	if *showHelp {
@@ -202,10 +202,10 @@ func printTextSummary(root *models.Entry) {
 }
 
 func printUsage() {
-	fmt.Fprintf(os.Stderr, `real-disk-map (rdm-cli) - real allocated disk usage analyzer
+	fmt.Fprintf(os.Stderr, `MapMyStorage (mapmystorage) - real allocated disk usage analyzer
 
 Usage:
-  rdm-cli [options] [path]
+  mapmystorage [options] [path]
 
 Options:
   -version            Show version

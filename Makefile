@@ -1,7 +1,7 @@
-# real-disk-map Makefile
+# MapMyStorage Makefile
 
-BINARY_NAME := rdm-cli
-CMD_DIR := ./cmd/rdm-cli
+BINARY_NAME := mapmystorage
+CMD_DIR := ./cmd/mapmystorage
 BUILD_DIR := bin
 DIST_DIR := dist
 VERSION ?= 0.2.0
@@ -15,7 +15,7 @@ all: build
 
 ## help: Show this help message
 help:
-	@echo "real-disk-map - Real disk usage analyzer"
+	@echo "MapMyStorage - Real disk usage analyzer"
 	@echo ""
 	@echo "Usage:"
 	@echo "  make [target]"
@@ -96,7 +96,7 @@ package:
 
 ## version: Show the current source version
 version:
-	@echo "real-disk-map $(VERSION)"
+	@echo "MapMyStorage $(VERSION)"
 
 ## clean: Remove generated artifacts
 clean:

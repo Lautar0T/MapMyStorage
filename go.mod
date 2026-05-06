@@ -1,4 +1,4 @@
-module github.com/lautaro/real-disk-map
+module github.com/lautar0t/MapMyStorage
 
 go 1.25.0
 

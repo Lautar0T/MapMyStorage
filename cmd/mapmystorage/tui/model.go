@@ -15,9 +15,9 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/lautaro/real-disk-map/core/disk"
-	"github.com/lautaro/real-disk-map/core/export"
-	"github.com/lautaro/real-disk-map/core/models"
+	"github.com/lautar0t/MapMyStorage/core/disk"
+	"github.com/lautar0t/MapMyStorage/core/export"
+	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
 // AppModel represents the state of the TUI application.
@@ -394,7 +394,7 @@ func ExportToFile(entry *models.Entry, format string) (string, error) {
 		return "", err
 	}
 
-	filename := fmt.Sprintf("real-disk-map_%s.%s", time.Now().Format("20060102_150405"), format)
+	filename := fmt.Sprintf("MapMyStorage_%s.%s", time.Now().Format("20060102_150405"), format)
 	outPath := filepath.Join(home, filename)
 
 	f, err := os.Create(outPath)

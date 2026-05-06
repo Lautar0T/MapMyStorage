@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/lautaro/real-disk-map/core/models"
+	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
 // Cache provides disk-based caching of scan results.
@@ -36,7 +36,7 @@ func NewCache(cacheDir string) (*Cache, error) {
 		if err != nil {
 			return nil, err
 		}
-		cacheDir = filepath.Join(home, ".cache", "real-disk-map")
+		cacheDir = filepath.Join(home, ".cache", "MapMyStorage")
 	}
 
 	// Ensure cache directory exists

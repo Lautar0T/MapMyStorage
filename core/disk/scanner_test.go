@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/lautaro/real-disk-map/core/models"
+	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
 func TestScanner_Scan(t *testing.T) {
