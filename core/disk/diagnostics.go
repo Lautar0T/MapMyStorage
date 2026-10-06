@@ -17,13 +17,18 @@ func CollectDiagnostics(ctx context.Context, path string) []models.Diagnostic {
 		return nil
 	}
 	commands := [][]string{
-		{"/usr/sbin/diskutil", "info", path},
 		{"/usr/sbin/diskutil", "apfs", "list"},
 		{"/usr/bin/tmutil", "listlocalsnapshots", "/"},
 		{"/usr/sbin/diskutil", "apfs", "listSnapshots", "/"},
 		{"/usr/sbin/diskutil", "apfs", "listSnapshots", "/System/Volumes/Data"},
 	}
 	var checks []models.Diagnostic
+	volume, err := diagnosticVolume(path)
+	if err != nil {
+		checks = append(checks, models.Diagnostic{Command: "Resolve volume for " + path, Error: err.Error()})
+	} else {
+		commands = append([][]string{{"/usr/sbin/diskutil", "info", volume}}, commands...)
+	}
 	for _, args := range commands {
 		if ctx.Err() != nil {
 			break

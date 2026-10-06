@@ -42,3 +42,12 @@ func excludedMounts(root string, wholeDisk bool) (map[string]bool, error) {
 	}
 	return excluded, nil
 }
+
+// diskutil info accepts a device or volume mount point, not arbitrary subfolders.
+func diagnosticVolume(path string) (string, error) {
+	var st unix.Statfs_t
+	if err := unix.Statfs(path, &st); err != nil {
+		return "", err
+	}
+	return strings.TrimRight(string(st.Mntonname[:]), "\x00"), nil
+}

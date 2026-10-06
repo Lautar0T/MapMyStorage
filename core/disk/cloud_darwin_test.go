@@ -2,6 +2,7 @@ package disk
 
 import (
 	"os"
+	"path/filepath"
 	"syscall"
 	"testing"
 	"time"
@@ -35,5 +36,35 @@ func TestDatalessDirectoryNotEnumerated(t *testing.T) {
 	e, err := s.visit(t.Context(), "/nonexistent/Dropbox/dir", fakeDatalessInfo{directory: true}, 0, st)
 	if err != nil || e.Skipped == "" || e.ScanError != "" || !e.Incomplete || st.report.Errors != 0 {
 		t.Fatalf("dataless directory enumerated: %+v %v", e, err)
+	}
+}
+
+func TestDiagnosticVolumeForSubdirectoryAndFile(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "file")
+	if err := os.WriteFile(path, []byte("test"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	dirVolume, err := diagnosticVolume(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fileVolume, err := diagnosticVolume(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirVolume != fileVolume || dirVolume == root || !filepath.IsAbs(dirVolume) {
+		t.Fatalf("not a containing mount point: %q %q", dirVolume, fileVolume)
+	}
+	mount, err := os.Stat(dirVolume)
+	if err != nil || !mount.IsDir() {
+		t.Fatalf("unusable mount point: %v", err)
+	}
+	file, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if deviceIdentity(mount) != deviceIdentity(file) {
+		t.Fatal("resolved a different filesystem")
 	}
 }

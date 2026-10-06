@@ -3,6 +3,7 @@
 ## Unreleased
 
 - Added startup-disk scanning and read-only diagnosis with APFS/Time Machine checks.
+- Resolve arbitrary scan roots to their containing volume before calling diskutil.
 - Report allocated and logical sizes, cloud totals, largest files and scan coverage.
 - Include hidden files by default; preserve permission errors in TUI, JSON and CSV.
 - Keep zero allocation accurate; deduplicate Unix hard links and macOS firmlinks.
