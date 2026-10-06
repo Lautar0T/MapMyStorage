@@ -1,9 +1,10 @@
-// Package disk provides filesystem scanning and disk usage calculation.
+// Package disk scans filesystem metadata without opening file contents.
 package disk
 
 import (
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,36 +12,27 @@ import (
 	"runtime"
 	"sort"
 	"strings"
-	"sync"
-	"sync/atomic"
+	"time"
 
 	"github.com/lautar0t/MapMyStorage/core/models"
 )
 
-// Scanner scans directories and calculates real disk usage.
 type Scanner struct {
 	config         models.ScanConfig
 	cloudDetector  *CloudDetector
 	excludeRegexps []*regexp.Regexp
 }
 
-// NewScanner creates a new scanner with the given configuration.
 func NewScanner(config models.ScanConfig) *Scanner {
-	s := &Scanner{
-		config:        config,
-		cloudDetector: NewCloudDetector(),
-	}
-
+	s := &Scanner{config: config, cloudDetector: NewCloudDetector()}
 	for _, pattern := range config.ExcludePatterns {
 		if pattern == "" {
 			continue
 		}
-		re, err := compilePattern(pattern)
-		if err == nil {
+		if re, err := compilePattern(pattern); err == nil {
 			s.excludeRegexps = append(s.excludeRegexps, re)
 		}
 	}
-
 	return s
 }
 
@@ -54,424 +46,334 @@ func compilePattern(pattern string) (*regexp.Regexp, error) {
 	return regexp.Compile(`(?:^|[/\\])` + escaped + `$`)
 }
 
-// Scan performs a full scan of the configured root path.
-func (s *Scanner) Scan() (*models.Entry, error) {
-	return s.ScanWithContext(context.Background())
+// Every scan owns its state; Scanner is safe to reuse concurrently.
+type scanState struct {
+	report       *models.ScanReport
+	seen         map[string]string
+	devices      map[string]bool
+	mounts       map[string]bool
+	clusterSizes map[string]int64
+	progress     func(models.ScanProgress)
+	lastProgress time.Time
+	bytes        int64
 }
 
-// ScanWithContext performs a scan with context cancellation support.
+func (s *Scanner) Scan() (*models.Entry, error) { return s.ScanWithContext(context.Background()) }
 func (s *Scanner) ScanWithContext(ctx context.Context) (*models.Entry, error) {
-	rootPath, err := filepath.Abs(s.config.RootPath)
-	if err != nil {
-		return nil, err
-	}
-
-	info, err := os.Lstat(rootPath)
-	if err != nil {
-		return nil, err
-	}
-
-	if !info.IsDir() {
-		return s.scanFile(rootPath, info)
-	}
-
-	rootEntry := s.newDirectoryEntry(rootPath, info)
-	visited := map[string]struct{}{}
-	if s.config.FollowSymlinks {
-		visited[s.realPath(rootPath)] = struct{}{}
-	}
-
-	if err := s.scanDirectory(ctx, rootEntry, 0, visited, nil); err != nil {
-		return nil, err
-	}
-
-	return rootEntry, nil
+	return s.scan(ctx, nil)
 }
 
-// ScanAsync performs a scan and returns progress/results through a channel.
 func (s *Scanner) ScanAsync(ctx context.Context) (<-chan models.ScanEvent, error) {
-	eventCh := make(chan models.ScanEvent, 128)
-
+	ch := make(chan models.ScanEvent, 16)
 	go func() {
-		defer close(eventCh)
-
-		eventCh <- models.ScanEvent{Type: models.ScanEventStarted}
-
-		var filesScanned, dirsScanned, bytesProcessed, errorsEncountered int64
-
-		emit := func(path string) {
-			processed := atomic.LoadInt64(&filesScanned) + atomic.LoadInt64(&dirsScanned)
-			if processed%200 != 0 {
-				return
-			}
-
-			eventCh <- models.ScanEvent{
-				Type: models.ScanEventProgress,
-				Progress: &models.ScanProgress{
-					FilesScanned:      atomic.LoadInt64(&filesScanned),
-					DirsScanned:       atomic.LoadInt64(&dirsScanned),
-					BytesProcessed:    atomic.LoadInt64(&bytesProcessed),
-					CurrentPath:       path,
-					ErrorsEncountered: atomic.LoadInt64(&errorsEncountered),
-				},
+		defer close(ch)
+		send := func(e models.ScanEvent) {
+			select {
+			case ch <- e:
+			case <-ctx.Done():
 			}
 		}
-
-		rootPath, err := filepath.Abs(s.config.RootPath)
+		send(models.ScanEvent{Type: models.ScanEventStarted})
+		root, err := s.scan(ctx, func(p models.ScanProgress) {
+			// Progress may be dropped; completion and errors must not be dropped.
+			select {
+			case ch <- models.ScanEvent{Type: models.ScanEventProgress, Progress: &p}:
+			default:
+			}
+		})
 		if err != nil {
-			eventCh <- models.ScanEvent{Type: models.ScanEventError, Error: err}
+			send(models.ScanEvent{Type: models.ScanEventError, Error: err})
 			return
 		}
-
-		info, err := os.Lstat(rootPath)
-		if err != nil {
-			eventCh <- models.ScanEvent{Type: models.ScanEventError, Error: err}
-			return
-		}
-
-		if !info.IsDir() {
-			entry, scanErr := s.scanFile(rootPath, info)
-			if scanErr != nil {
-				eventCh <- models.ScanEvent{Type: models.ScanEventError, Error: scanErr}
-				return
-			}
-			eventCh <- models.ScanEvent{Type: models.ScanEventCompleted, Entry: entry}
-			return
-		}
-
-		rootEntry := s.newDirectoryEntry(rootPath, info)
-		visited := map[string]struct{}{}
-		if s.config.FollowSymlinks {
-			visited[s.realPath(rootPath)] = struct{}{}
-		}
-
-		progress := &scanProgressState{
-			filesScanned:      &filesScanned,
-			dirsScanned:       &dirsScanned,
-			bytesProcessed:    &bytesProcessed,
-			errorsEncountered: &errorsEncountered,
-			emit:              emit,
-		}
-
-		if err := s.scanDirectory(ctx, rootEntry, 0, visited, progress); err != nil {
-			eventCh <- models.ScanEvent{Type: models.ScanEventError, Error: err}
-			return
-		}
-
-		eventCh <- models.ScanEvent{
-			Type: models.ScanEventProgress,
-			Progress: &models.ScanProgress{
-				FilesScanned:      atomic.LoadInt64(&filesScanned),
-				DirsScanned:       atomic.LoadInt64(&dirsScanned),
-				BytesProcessed:    atomic.LoadInt64(&bytesProcessed),
-				CurrentPath:       rootPath,
-				ErrorsEncountered: atomic.LoadInt64(&errorsEncountered),
-			},
-		}
-		eventCh <- models.ScanEvent{Type: models.ScanEventCompleted, Entry: rootEntry}
+		send(models.ScanEvent{Type: models.ScanEventCompleted, Entry: root})
 	}()
-
-	return eventCh, nil
+	return ch, nil
 }
 
-type scanProgressState struct {
-	filesScanned      *int64
-	dirsScanned       *int64
-	bytesProcessed    *int64
-	errorsEncountered *int64
-	emit              func(path string)
-}
-
-func (s *Scanner) scanDirectory(
-	ctx context.Context,
-	parent *models.Entry,
-	depth int,
-	visited map[string]struct{},
-	progress *scanProgressState,
-) error {
+func (s *Scanner) scan(ctx context.Context, progress func(models.ScanProgress)) (*models.Entry, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
-
-	if progress != nil {
-		atomic.AddInt64(progress.dirsScanned, 1)
-		progress.emit(parent.Path)
-	}
-
-	if s.config.MaxDepth > 0 && depth >= s.config.MaxDepth {
-		logical, physical := s.summarizeDirectory(ctx, parent.Path, visited, progress)
-		parent.LogicalSize = logical
-		parent.PhysicalSize = physical
-		parent.Children = nil
-		return nil
-	}
-
-	entries, err := os.ReadDir(parent.Path)
+	path, err := filepath.Abs(s.config.RootPath)
 	if err != nil {
-		if progress != nil {
-			atomic.AddInt64(progress.errorsEncountered, 1)
-		}
-		return nil
+		return nil, err
 	}
-
-	semaphore := make(chan struct{}, runtime.NumCPU()*2)
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-
-	for _, dirEntry := range entries {
-		name := dirEntry.Name()
-		path := filepath.Join(parent.Path, name)
-
-		if !s.config.ShowHidden && strings.HasPrefix(name, ".") {
-			continue
-		}
-		if s.isExcluded(path, name) {
-			continue
-		}
-
-		info, err := os.Lstat(path)
-		if err != nil {
-			if progress != nil {
-				atomic.AddInt64(progress.errorsEncountered, 1)
-			}
-			continue
-		}
-
-		isSymlink := info.Mode()&os.ModeSymlink != 0
-		treatAsDir := info.IsDir()
-		if isSymlink && s.config.FollowSymlinks {
-			targetInfo, targetErr := os.Stat(path)
-			if targetErr == nil && targetInfo.IsDir() {
-				treatAsDir = true
-				info = targetInfo
+	// Resolve the explicitly requested root (e.g. ~/Dropbox), not descendant links.
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	report := &models.ScanReport{StartedAt: time.Now(), Config: s.config, Cloud: make(map[models.CloudProvider]*models.CloudUsage)}
+	report.Config.RootPath = path
+	report.Volume, err = VolumeUsage(path)
+	if err != nil {
+		report.VolumeError = err.Error()
+	}
+	st := &scanState{report: report, seen: make(map[string]string), devices: map[string]bool{deviceIdentity(info): true}, progress: progress}
+	if s.config.WholeDisk && runtime.GOOS == "darwin" {
+		// Startup System, Data and VM volumes only. Recovery, backups, external and
+		// network mounts stay outside the scan unless explicitly requested.
+		for _, mount := range []string{"/System/Volumes/Data", "/System/Volumes/VM"} {
+			if i, e := os.Stat(mount); e == nil {
+				st.devices[deviceIdentity(i)] = true
 			}
 		}
+	}
+	var mountErr error
+	if !s.config.CrossFilesystems {
+		st.mounts, mountErr = excludedMounts(path, s.config.WholeDisk)
+	}
+	root, err := s.visit(ctx, path, info, 0, st)
+	if err != nil {
+		return nil, err
+	}
+	if mountErr != nil {
+		st.issue(root, "mount table unavailable: "+mountErr.Error(), true)
+	}
+	if s.config.Diagnostics || s.config.WholeDisk {
+		report.Diagnostics = CollectDiagnostics(ctx, path)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	report.FinishedAt = time.Now()
+	root.Report = report
+	st.emit(path, true)
+	return root, nil
+}
 
-		if treatAsDir {
-			child := s.newDirectoryEntry(path, info)
-			child.Parent = parent
-			child.IsSymlink = isSymlink
+func (st *scanState) emit(path string, force bool) {
+	if st.progress == nil || (!force && time.Since(st.lastProgress) < 100*time.Millisecond) {
+		return
+	}
+	st.lastProgress = time.Now()
+	st.progress(models.ScanProgress{FilesScanned: st.report.Files, DirsScanned: st.report.Directories, BytesProcessed: st.bytes, CurrentPath: path, ErrorsEncountered: st.report.Errors})
+}
+func (st *scanState) issue(e *models.Entry, reason string, isError bool) {
+	e.Incomplete = true
+	if isError {
+		e.ScanError = reason
+		st.report.Errors++
+	} else {
+		e.Skipped = reason
+		st.report.Skipped++
+	}
+	if len(st.report.Issues) < 100 {
+		st.report.Issues = append(st.report.Issues, models.ScanIssue{Path: e.Path, Reason: reason})
+	}
+}
 
-			if s.config.FollowSymlinks {
-				real := s.realPath(path)
-				if _, exists := visited[real]; exists {
-					continue
-				}
-				visited[real] = struct{}{}
-			}
-
-			err := s.scanDirectory(ctx, child, depth+1, visited, progress)
-			if s.config.FollowSymlinks {
-				delete(visited, s.realPath(path))
-			}
+func (s *Scanner) visit(ctx context.Context, path string, info os.FileInfo, depth int, st *scanState) (*models.Entry, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	uid, gid := extractOwnership(info)
+	e := &models.Entry{Path: path, Name: filepath.Base(path), ModTime: info.ModTime(), Permissions: uint32(info.Mode().Perm()), UID: uid, GID: gid}
+	e.IsSymlink = info.Mode()&os.ModeSymlink != 0
+	if e.IsSymlink {
+		e.SymlinkTarget, _ = os.Readlink(path)
+		if s.config.FollowSymlinks {
+			target, err := os.Stat(path)
 			if err != nil {
-				if progress != nil {
-					atomic.AddInt64(progress.errorsEncountered, 1)
+				st.issue(e, err.Error(), true)
+			} else {
+				info = target
+			}
+		}
+	}
+	switch {
+	case info.IsDir():
+		e.Type = models.EntryTypeDir
+	case info.Mode()&os.ModeSymlink != 0:
+		e.Type = models.EntryTypeSymlink
+	case info.Mode().IsRegular():
+		e.Type = models.EntryTypeFile
+	default:
+		e.Type = models.EntryTypeOther
+	}
+	if e.Type != models.EntryTypeDir {
+		e.LogicalSize = info.Size()
+	}
+	if !s.config.CrossFilesystems && !st.devices[deviceIdentity(info)] {
+		st.issue(e, "different filesystem (use -cross-filesystems to include)", false)
+		return e, nil
+	}
+	// Device + inode catches hard links, firmlinks and followed symlink cycles.
+	id := ""
+	if info.IsDir() || hasMultipleLinks(info) || s.config.FollowSymlinks {
+		id = fileIdentity(info)
+	}
+	if id == "" && info.IsDir() {
+		id, _ = filepath.EvalSymlinks(path)
+	}
+	if id != "" {
+		if original, ok := st.seen[id]; ok {
+			e.CountedElsewhere = original
+			st.report.Duplicates++
+			return e, nil
+		}
+		st.seen[id] = path
+	}
+	if st.clusterSizes == nil {
+		st.clusterSizes = make(map[string]int64)
+	}
+	device := deviceIdentity(info)
+	if device == "" {
+		device = filepath.VolumeName(path)
+	}
+	cluster, known := st.clusterSizes[device]
+	if !known {
+		clusterPath := path
+		if e.Type != models.EntryTypeDir {
+			clusterPath = filepath.Dir(path)
+		}
+		cluster, _ = GetClusterSize(clusterPath)
+		st.clusterSizes[device] = cluster
+	}
+	e.ClusterSize = cluster
+	physical, err := GetPhysicalSize(path, info)
+	if err != nil {
+		st.issue(e, err.Error(), true)
+	} else {
+		e.PhysicalSize = physical
+	}
+	if s.config.IncludeCloudInfo && !e.IsSymlink {
+		e.CloudProvider, e.CloudStatus, _ = s.cloudDetector.DetectCloudStatus(path, info)
+		e.IsCloud = e.CloudProvider != models.CloudProviderNone
+	}
+	if e.Type != models.EntryTypeDir {
+		st.report.Files++
+		st.bytes += e.PhysicalSize
+		if e.IsCloud {
+			c := st.report.Cloud[e.CloudProvider]
+			if c == nil {
+				c = &models.CloudUsage{}
+				st.report.Cloud[e.CloudProvider] = c
+			}
+			c.Files++
+			c.Logical += e.LogicalSize
+			c.Allocated += e.PhysicalSize
+			if e.CloudStatus == models.CloudStatusOnlineOnly {
+				c.OnlineOnly++
+			}
+			if e.CloudStatus == models.CloudStatusUnknown {
+				c.Unknown++
+			}
+		}
+		if e.Type == models.EntryTypeFile {
+			st.keepLargest(e)
+		}
+		st.emit(path, false)
+		return e, nil
+	}
+	defer func() { st.report.LargestDirectories = keepLargest(st.report.LargestDirectories, e) }()
+	st.report.Directories++
+	st.bytes += e.PhysicalSize
+	st.emit(path, false)
+	// Enumerating a dataless directory can cause macOS to materialize it.
+	if isDataless(info) {
+		if e.IsCloud {
+			c := st.report.Cloud[e.CloudProvider]
+			if c == nil {
+				c = &models.CloudUsage{}
+				st.report.Cloud[e.CloudProvider] = c
+			}
+			c.SkippedDirectories++
+		}
+		st.issue(e, "online-only directory: not enumerated to avoid materialization", false)
+		return e, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		st.issue(e, err.Error(), true)
+		return e, nil
+	}
+	defer f.Close()
+	retain := s.config.MaxDepth == 0 || depth < s.config.MaxDepth
+	e.Summarized = !retain
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		entries, readErr := f.ReadDir(256)
+		// Stable within batches; avoids retaining a huge directory listing.
+		sort.Slice(entries, func(i, j int) bool { return entries[i].Name() < entries[j].Name() })
+		for _, de := range entries {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			childPath := filepath.Join(path, de.Name())
+			if (!s.config.ShowHidden && strings.HasPrefix(de.Name(), ".")) || s.isExcluded(childPath, de.Name()) {
+				omitted := &models.Entry{Path: childPath}
+				st.issue(omitted, "filtered by scan options", false)
+				e.Incomplete = true
+				continue
+			}
+			if st.mounts[childPath] {
+				child := &models.Entry{Path: childPath, Name: de.Name(), Type: models.EntryTypeDir}
+				st.issue(child, "mount omitted before stat (use -cross-filesystems to include)", false)
+				e.Incomplete = true
+				if retain {
+					child.Parent = e
+					e.Children = append(e.Children, child)
 				}
 				continue
 			}
-
-			mu.Lock()
-			parent.Children = append(parent.Children, child)
-			mu.Unlock()
-			continue
-		}
-
-		wg.Add(1)
-		semaphore <- struct{}{}
-		go func(path string, info os.FileInfo) {
-			defer wg.Done()
-			defer func() { <-semaphore }()
-
-			child, scanErr := s.scanFile(path, info)
-			if scanErr != nil {
-				if progress != nil {
-					atomic.AddInt64(progress.errorsEncountered, 1)
-				}
-				return
-			}
-			child.Parent = parent
-
-			mu.Lock()
-			parent.Children = append(parent.Children, child)
-			mu.Unlock()
-
-			if progress != nil {
-				atomic.AddInt64(progress.filesScanned, 1)
-				atomic.AddInt64(progress.bytesProcessed, child.PhysicalSize)
-				progress.emit(path)
-			}
-		}(path, info)
-	}
-
-	wg.Wait()
-
-	sort.Sort(models.ByPhysicalSize(parent.Children))
-	var totalLogical, totalPhysical int64
-	for _, child := range parent.Children {
-		totalLogical += child.TotalLogicalSize()
-		totalPhysical += child.TotalPhysicalSize()
-	}
-	parent.LogicalSize = totalLogical
-	parent.PhysicalSize = totalPhysical
-
-	return nil
-}
-
-func (s *Scanner) summarizeDirectory(
-	ctx context.Context,
-	path string,
-	visited map[string]struct{},
-	progress *scanProgressState,
-) (int64, int64) {
-	if err := ctx.Err(); err != nil {
-		return 0, 0
-	}
-
-	entries, err := os.ReadDir(path)
-	if err != nil {
-		if progress != nil {
-			atomic.AddInt64(progress.errorsEncountered, 1)
-		}
-		return 0, 0
-	}
-
-	var logicalTotal, physicalTotal int64
-	for _, dirEntry := range entries {
-		name := dirEntry.Name()
-		childPath := filepath.Join(path, name)
-
-		if !s.config.ShowHidden && strings.HasPrefix(name, ".") {
-			continue
-		}
-		if s.isExcluded(childPath, name) {
-			continue
-		}
-
-		info, lerr := os.Lstat(childPath)
-		if lerr != nil {
-			if progress != nil {
-				atomic.AddInt64(progress.errorsEncountered, 1)
-			}
-			continue
-		}
-
-		isSymlink := info.Mode()&os.ModeSymlink != 0
-		treatAsDir := info.IsDir()
-		if isSymlink && s.config.FollowSymlinks {
-			targetInfo, targetErr := os.Stat(childPath)
-			if targetErr == nil && targetInfo.IsDir() {
-				treatAsDir = true
-				info = targetInfo
-			}
-		}
-
-		if treatAsDir {
-			if s.config.FollowSymlinks {
-				real := s.realPath(childPath)
-				if _, exists := visited[real]; exists {
-					continue
-				}
-				visited[real] = struct{}{}
-				subLogical, subPhysical := s.summarizeDirectory(ctx, childPath, visited, progress)
-				delete(visited, real)
-				logicalTotal += subLogical
-				physicalTotal += subPhysical
+			childInfo, err := de.Info()
+			var child *models.Entry
+			if err != nil {
+				child = &models.Entry{Path: childPath, Name: de.Name(), Type: models.EntryTypeOther}
+				st.issue(child, err.Error(), true)
 			} else {
-				subLogical, subPhysical := s.summarizeDirectory(ctx, childPath, visited, progress)
-				logicalTotal += subLogical
-				physicalTotal += subPhysical
+				child, err = s.visit(ctx, childPath, childInfo, depth+1, st)
+				if err != nil {
+					return nil, err
+				}
 			}
-			continue
+			e.LogicalSize += child.LogicalSize
+			e.PhysicalSize += child.PhysicalSize
+			e.Incomplete = e.Incomplete || child.Incomplete
+			if retain {
+				child.Parent = e
+				e.Children = append(e.Children, child)
+			}
 		}
-
-		logicalTotal += info.Size()
-		physicalSize, perr := GetPhysicalSize(childPath, info)
-		if perr != nil {
-			physicalSize = 0
-		}
-		physicalTotal += physicalSize
-		if progress != nil {
-			atomic.AddInt64(progress.filesScanned, 1)
-			atomic.AddInt64(progress.bytesProcessed, physicalSize)
-			progress.emit(childPath)
+		if readErr != nil {
+			if readErr != io.EOF {
+				st.issue(e, readErr.Error(), true)
+			}
+			break
 		}
 	}
-
-	return logicalTotal, physicalTotal
+	models.SortDescendingEntries(e.Children, models.SortByPhysicalSize)
+	return e, nil
 }
 
-// scanFile scans a single file/symlink and returns its entry.
-func (s *Scanner) scanFile(path string, info os.FileInfo) (*models.Entry, error) {
-	entryType := models.EntryTypeFile
-	isSymlink := info.Mode()&os.ModeSymlink != 0
-	if isSymlink {
-		entryType = models.EntryTypeSymlink
+func (st *scanState) keepLargest(e *models.Entry) {
+	st.report.LargestFiles = keepLargest(st.report.LargestFiles, e)
+}
+func keepLargest(entries []*models.Entry, e *models.Entry) []*models.Entry {
+	if len(entries) == 20 && e.PhysicalSize <= entries[len(entries)-1].PhysicalSize {
+		return entries
 	}
-
-	logicalSize := info.Size()
-	physicalSize, err := GetPhysicalSize(path, info)
-	if err != nil {
-		physicalSize = 0
+	copy := *e
+	copy.Parent = nil
+	copy.Children = nil
+	copy.Report = nil
+	entries = append(entries, &copy)
+	sort.Slice(entries, func(i, j int) bool { return entries[i].PhysicalSize > entries[j].PhysicalSize })
+	if len(entries) > 20 {
+		entries = entries[:20]
 	}
-
-	clusterSize, _ := GetClusterSize(filepath.Dir(path))
-	uid, gid := extractOwnership(info)
-
-	provider := models.CloudProviderNone
-	status := models.CloudStatusLocal
-	isCloud := false
-	if s.config.IncludeCloudInfo {
-		provider, status, _ = s.cloudDetector.DetectCloudStatus(path, info)
-		isCloud = provider != models.CloudProviderNone
-	}
-
-	return &models.Entry{
-		Path:          path,
-		Name:          info.Name(),
-		Type:          entryType,
-		LogicalSize:   logicalSize,
-		PhysicalSize:  physicalSize,
-		ClusterSize:   clusterSize,
-		IsSymlink:     isSymlink,
-		IsCloud:       isCloud,
-		CloudProvider: provider,
-		CloudStatus:   status,
-		ModTime:       info.ModTime(),
-		Permissions:   uint32(info.Mode().Perm()),
-		UID:           uid,
-		GID:           gid,
-	}, nil
+	return entries
 }
 
-func (s *Scanner) newDirectoryEntry(path string, info os.FileInfo) *models.Entry {
-	uid, gid := extractOwnership(info)
-
-	return &models.Entry{
-		Path:         path,
-		Name:         filepath.Base(path),
-		Type:         models.EntryTypeDir,
-		LogicalSize:  0,
-		PhysicalSize: 0,
-		ModTime:      info.ModTime(),
-		Permissions:  uint32(info.Mode().Perm()),
-		UID:          uid,
-		GID:          gid,
-		Children:     make([]*models.Entry, 0),
-	}
-}
-
-func (s *Scanner) realPath(path string) string {
-	real, err := filepath.EvalSymlinks(path)
-	if err != nil {
-		return filepath.Clean(path)
-	}
-	return filepath.Clean(real)
-}
-
-// isExcluded checks whether a path or base name matches any configured pattern.
 func (s *Scanner) isExcluded(path, name string) bool {
-	normPath := strings.ReplaceAll(path, `\\`, `/`)
+	normPath := strings.ReplaceAll(path, `\`, `/`)
 	for _, re := range s.excludeRegexps {
 		if re.MatchString(normPath) || re.MatchString(name) {
 			return true

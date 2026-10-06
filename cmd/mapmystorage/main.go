@@ -1,37 +1,47 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
+	"io"
 	"os"
+	"os/signal"
 	"path/filepath"
-	"sort"
+	"runtime"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/term"
 	"github.com/lautar0t/MapMyStorage/cmd/mapmystorage/tui"
 	"github.com/lautar0t/MapMyStorage/core/disk"
 	"github.com/lautar0t/MapMyStorage/core/export"
 	"github.com/lautar0t/MapMyStorage/core/models"
+	"github.com/lautar0t/MapMyStorage/core/report"
 )
 
 var version = "dev"
 
 func main() {
 	var (
+		wholeDisk      = flag.Bool("whole-disk", false, "Scan startup disk including hidden data (macOS: System, Data, VM)")
+		diagnose       = flag.Bool("diagnose", false, "Read-only disk diagnosis (whole disk unless a root is supplied)")
+		crossFS        = flag.Bool("cross-filesystems", false, "Include other mounted filesystems; may include network/external disks")
 		showVersion    = flag.Bool("version", false, "Show version")
 		showHelp       = flag.Bool("help", false, "Show help")
 		rootPath       = flag.String("root", "", "Root path to scan (default: home directory)")
 		jsonOutput     = flag.Bool("json", false, "Output as JSON")
 		csvOutput      = flag.Bool("csv", false, "Output as CSV")
 		noInteractive  = flag.Bool("no-interactive", false, "Run without interactive TUI")
-		showHidden     = flag.Bool("hidden", false, "Show hidden files")
+		showHidden     = flag.Bool("hidden", true, "Include hidden files (default true)")
 		followSymlinks = flag.Bool("follow-symlinks", false, "Follow symbolic links")
 		maxDepth       = flag.Int("max-depth", 0, "Maximum scan depth (0 = unlimited)")
 		exclude        = flag.String("exclude", "", "Comma-separated exclude patterns")
 	)
 
-	flag.Usage = printUsage
+	flag.BoolVar(showHelp, "h", false, "Show help")
+	flag.Usage = func() { printUsage(os.Stderr) }
 	flag.Parse()
 
 	if *showVersion {
@@ -39,17 +49,35 @@ func main() {
 		return
 	}
 	if *showHelp {
-		printUsage()
+		printUsage(os.Stdout)
 		return
 	}
 
 	if err := validateFlags(*jsonOutput, *csvOutput, *maxDepth); err != nil {
 		fmt.Fprintf(os.Stderr, "Invalid options: %v\n\n", err)
-		printUsage()
+		printUsage(os.Stderr)
 		os.Exit(2)
 	}
 
+	if err := validatePaths(*rootPath, flag.Args()); err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid options: %v\n", err)
+		os.Exit(2)
+	}
+	if *wholeDisk && (*rootPath != "" || len(flag.Args()) > 0) {
+		fmt.Fprintln(os.Stderr, "-whole-disk cannot be combined with an explicit path")
+		os.Exit(2)
+	}
+	if *diagnose && *rootPath == "" && len(flag.Args()) == 0 {
+		*wholeDisk = true
+	}
 	scanRoot := resolveRoot(*rootPath, flag.Args())
+	if *wholeDisk {
+		scanRoot = string(filepath.Separator)
+		if runtime.GOOS == "windows" {
+			scanRoot = filepath.VolumeName(os.Getenv("SystemRoot")) + string(filepath.Separator)
+		}
+		*showHidden = true
+	}
 	absRoot, err := filepath.Abs(scanRoot)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error resolving path: %v\n", err)
@@ -68,17 +96,20 @@ func main() {
 		MaxDepth:         *maxDepth,
 		ShowHidden:       *showHidden,
 		IncludeCloudInfo: true,
+		CrossFilesystems: *crossFS, WholeDisk: *wholeDisk, Diagnostics: *diagnose,
 	}
 
-	if !*jsonOutput && !*csvOutput && !*noInteractive {
+	if !*jsonOutput && !*csvOutput && !*noInteractive && !*diagnose && interactiveTerminal() {
 		appCfg := tui.Config{
-			RootPath:        absRoot,
+			RootPath:         absRoot,
+			CrossFilesystems: *crossFS, WholeDisk: *wholeDisk,
 			FollowSymlinks:  *followSymlinks,
 			ExcludePatterns: excludePatterns,
 			MaxDepth:        *maxDepth,
 			ShowHidden:      *showHidden,
 		}
 		model := tui.NewAppModel(appCfg)
+		defer model.ScanCancel()
 		p := tea.NewProgram(model, tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintf(os.Stderr, "Error running TUI: %v\n", err)
@@ -88,7 +119,9 @@ func main() {
 	}
 
 	scanner := disk.NewScanner(scanConfig)
-	entry, err := scanner.Scan()
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer stop()
+	entry, err := scanWithProgress(ctx, scanner)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Scan failed: %v\n", err)
 		os.Exit(1)
@@ -161,79 +194,81 @@ func resolveRoot(rootFlag string, args []string) string {
 	return home
 }
 
-func printTextSummary(root *models.Entry) {
-	fmt.Printf("Root: %s\n", root.Path)
-	fmt.Printf("Total real:    %s\n", formatBytes(root.TotalPhysicalSize()))
-	fmt.Printf("Total logical: %s\n", formatBytes(root.TotalLogicalSize()))
+func printTextSummary(root *models.Entry) { report.Write(os.Stdout, root) }
 
-	if root.TotalLogicalSize() > 0 {
-		delta := root.TotalLogicalSize() - root.TotalPhysicalSize()
-		fmt.Printf("Difference:    %s\n", formatBytes(delta))
-	}
-
-	all := make([]*models.Entry, 0, 1024)
-	_ = models.WalkEntry(root, func(e *models.Entry) error {
-		if e.Path != root.Path {
-			all = append(all, e)
-		}
-		return nil
-	})
-
-	sort.Slice(all, func(i, j int) bool {
-		return all[i].PhysicalSize > all[j].PhysicalSize
-	})
-
-	fmt.Println("\nTop 20 by real disk usage:")
-	for i, e := range all {
-		if i >= 20 {
-			break
-		}
-		kind := "F"
-		if e.Type == models.EntryTypeDir {
-			kind = "D"
-		}
-		fmt.Printf("%2d. [%s] %10s  %s\n", i+1, kind, formatBytes(e.PhysicalSize), e.Path)
-	}
-
-	fmt.Println("\nLevel summary (children of current root):")
-	for _, child := range root.Children {
-		fmt.Printf("%-40s %10s\n", truncate(child.Name, 40), formatBytes(child.TotalPhysicalSize()))
-	}
-}
-
-func printUsage() {
-	fmt.Fprintf(os.Stderr, `MapMyStorage (mapmystorage) - real allocated disk usage analyzer
+func printUsage(w io.Writer) {
+	fmt.Fprint(w, `MapMyStorage — allocated disk usage, logical sizes and cloud diagnostics
 
 Usage:
   mapmystorage [options] [path]
 
-Options:
-  -version            Show version
-  -help               Show this help
-  -root string        Root path to scan (default: home)
-  -json               Output full JSON tree
-  -csv                Output flattened CSV
-  -no-interactive     Text summary mode
-  -hidden             Show hidden files
-  -follow-symlinks    Follow symbolic links (default: false)
-  -max-depth int      Max depth (0 unlimited)
-  -exclude string     Comma-separated exclude patterns
+Examples:
+  mapmystorage --whole-disk                    Explore the startup disk
+  mapmystorage --diagnose --max-depth 5         Full-disk text diagnosis
+  mapmystorage --root ~/Library                Explore application data
+  mapmystorage --json --root ~/Downloads > disk.json
+  mapmystorage --csv --root ~/Downloads > disk.csv
+  mapmystorage --exclude ".git,node_modules" --root ~/Projects
+
+Options (both -option and --option are accepted):
+  --help, -h          Show this help and exit
+  --version          Show the build version
+  --root PATH        Root to scan (default: home; or use one positional path)
+  --whole-disk       Startup disk: macOS System, Data and VM; includes hidden files
+  --diagnose         Text diagnosis and read-only OS checks; defaults to whole disk
+                     unless --root or a positional path is supplied
+  --json             JSON tree, totals, coverage and diagnostics (when requested)
+  --csv              CSV rows with allocated/logical sizes and coverage flags
+  --no-interactive   Text report; also selected automatically when input/output
+                     is not an interactive terminal
+  --hidden=false     Exclude hidden entries in text/exports; hide them in the TUI
+                     (default: included; --whole-disk always includes them)
+  --follow-symlinks  Follow descendant symbolic links (default: false)
+  --max-depth N      Retained tree depth (0 = unlimited); still measures deeper files
+  --exclude GLOBS    Comma-separated names/globs to omit from the scan
+  --cross-filesystems
+                     Traverse other mounts, including external/network disks
+                     (default on Unix: stay on the root filesystem, except the
+                     startup volumes included by --whole-disk)
+
+Put options before the positional path. Use -- before a path beginning with '-'.
+Do not combine --root with a positional path, --whole-disk with a path, or --json
+with --csv. --diagnose can be combined with --json or --csv. Full trees may use
+significant memory; --max-depth 5 keeps large diagnoses compact.
+
+Sizes and coverage:
+  Allocated = filesystem blocks, not guaranteed space freed by deleting files.
+  Logical = file lengths; sparse, compressed and cloud files can appear much larger.
+  GiB is binary; macOS Storage uses decimal GB. APFS clones, snapshots, metadata
+  and inaccessible paths mean totals need not equal the container's used space.
+  Errors/omissions remain visible as PARTIAL; unknown usage is not zero.
+  The scanner does not read file contents or delete files. macOS dataless
+  directories are not enumerated to avoid triggering materialization.
+  On macOS, grant Full Disk Access to the terminal/host app and restart it for
+  protected data. sudo alone does not bypass privacy restrictions.
+  Whole-disk mode omits Recovery, Preboot and external/backup mounts; macOS
+  diagnosis lists APFS volumes and snapshots separately. Windows currently lacks
+  Unix inode deduplication and mount-boundary checks.
 
 TUI shortcuts:
-  arrows              move
-  Enter               enter directory / reveal file
-  Backspace / Left    go to parent
-  r                   refresh
-  s                   cycle sort
-  /                   search
-  h                   toggle hidden
-  l                   toggle real/logical columns
-  v                   visual summary panel
-  o                   open/reveal in Finder/Explorer
-  t                   open in terminal
-  y                   copy path
-  e                   export JSON/CSV
-  q                   quit
+  arrows / j,k       move
+  Enter              enter directory / reveal file
+  Backspace / Left   go to parent
+  r                  rescan current directory as a new root
+  s                  cycle sort
+  /                  search current directory
+  h                  toggle hidden entries (totals still include them)
+  l                  swap allocated/logical columns
+  v                  visual summary panel
+  d                  diagnosis (arrows/PgUp/PgDn scroll; Esc closes)
+  o                  open/reveal in Finder/Explorer
+  t                  open in terminal
+  y                  copy path
+  e                  export JSON/CSV to your home directory
+  q / Ctrl+C         quit / cancel scan
+
+Exit codes: 0 = completed (possibly partial), 1 = scan/output/runtime failure,
+            2 = invalid arguments. Check report coverage before trusting totals.
 `)
 }
 
@@ -252,25 +287,45 @@ func parseExcludePatterns(s string) []string {
 	return out
 }
 
-func truncate(s string, max int) string {
-	if len(s) <= max {
-		return s
+func validatePaths(root string, args []string) error {
+	if len(args) > 1 {
+		return fmt.Errorf("accepts one path; place all options before the path")
 	}
-	if max <= 3 {
-		return s[:max]
+	if root != "" && len(args) > 0 {
+		return fmt.Errorf("--root cannot be combined with a positional path")
 	}
-	return s[:max-3] + "..."
+	return nil
 }
 
-func formatBytes(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return fmt.Sprintf("%d B", b)
+func interactiveTerminal() bool {
+	return term.IsTerminal(os.Stdin.Fd()) && term.IsTerminal(os.Stdout.Fd())
+}
+
+// Keep long text/JSON scans observable without contaminating stdout exports.
+func scanWithProgress(ctx context.Context, scanner *disk.Scanner) (*models.Entry, error) {
+	ch, err := scanner.ScanAsync(ctx)
+	if err != nil {
+		return nil, err
 	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
+	info, _ := os.Stderr.Stat()
+	terminal := info != nil && term.IsTerminal(os.Stderr.Fd())
+	last := time.Time{}
+	for event := range ch {
+		switch event.Type {
+		case models.ScanEventProgress:
+			if terminal && event.Progress != nil && time.Since(last) >= time.Second {
+				last = time.Now()
+				p := event.Progress
+				fmt.Fprintf(os.Stderr, "Scanned %d files, %d dirs, %s allocated, %d errors\n", p.FilesScanned, p.DirsScanned, report.Bytes(p.BytesProcessed), p.ErrorsEncountered)
+			}
+		case models.ScanEventCompleted:
+			return event.Entry, nil
+		case models.ScanEventError:
+			return nil, event.Error
+		}
 	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return nil, fmt.Errorf("scan ended without a result")
 }

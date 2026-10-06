@@ -59,6 +59,14 @@ type Entry struct {
 	UID           uint32        `json:"uid,omitempty"`
 	GID           uint32        `json:"gid,omitempty"`
 
+	// Allocation is observed metadata, not a promise of reclaimable space.
+	ScanError        string      `json:"scan_error,omitempty"`
+	Skipped          string      `json:"skipped,omitempty"`
+	Incomplete       bool        `json:"incomplete,omitempty"`
+	Summarized       bool        `json:"summarized,omitempty"`
+	CountedElsewhere string      `json:"counted_elsewhere,omitempty"`
+	Report           *ScanReport `json:"report,omitempty"`
+
 	// Children is populated for directories
 	Children []*Entry `json:"children,omitempty"`
 
@@ -67,34 +75,10 @@ type Entry struct {
 }
 
 // TotalLogicalSize returns the total logical size including children.
-func (e *Entry) TotalLogicalSize() int64 {
-	if e.Type != EntryTypeDir {
-		return e.LogicalSize
-	}
-	if len(e.Children) == 0 {
-		return e.LogicalSize
-	}
-	var total int64
-	for _, child := range e.Children {
-		total += child.TotalLogicalSize()
-	}
-	return total
-}
+func (e *Entry) TotalLogicalSize() int64 { return e.LogicalSize }
 
-// TotalPhysicalSize returns the total physical size including children.
-func (e *Entry) TotalPhysicalSize() int64 {
-	if e.Type != EntryTypeDir {
-		return e.PhysicalSize
-	}
-	if len(e.Children) == 0 {
-		return e.PhysicalSize
-	}
-	var total int64
-	for _, child := range e.Children {
-		total += child.TotalPhysicalSize()
-	}
-	return total
-}
+// TotalPhysicalSize includes directory blocks and counted descendants.
+func (e *Entry) TotalPhysicalSize() int64 { return e.PhysicalSize }
 
 // IsHidden returns true if the entry is a hidden file (starts with .).
 func (e *Entry) IsHidden() bool {
@@ -130,6 +114,9 @@ type ScanConfig struct {
 	ExcludePatterns  []string `json:"exclude_patterns"`
 	MaxDepth         int      `json:"max_depth"` // 0 = unlimited
 	ShowHidden       bool     `json:"show_hidden"`
+	CrossFilesystems bool     `json:"cross_filesystems"`
+	Diagnostics      bool     `json:"diagnostics"`
+	WholeDisk        bool     `json:"whole_disk"`
 	IncludeCloudInfo bool     `json:"include_cloud_info"`
 }
 

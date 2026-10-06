@@ -19,9 +19,7 @@ func GetPhysicalSize(path string, info os.FileInfo) (int64, error) {
 	}
 
 	physicalSize := stat.Blocks * 512
-	if physicalSize == 0 && stat.Size > 0 {
-		physicalSize = estimateMetadataSize(stat.Size)
-	}
+	// Zero blocks is valid for sparse files and cloud placeholders.
 
 	return physicalSize, nil
 }
@@ -51,17 +49,6 @@ func IsCompressed(path string) (bool, error) {
 
 func getXattrSize(path string, attr string) (int, error) {
 	return unix.Getxattr(path, attr, nil)
-}
-
-func estimateMetadataSize(logicalSize int64) int64 {
-	const apfsInodeSize = 512
-	if logicalSize == 0 {
-		return 0
-	}
-	if logicalSize < apfsInodeSize {
-		return logicalSize + 64
-	}
-	return apfsInodeSize
 }
 
 // GetExtendedAttributes returns all xattr names for a path.

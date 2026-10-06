@@ -308,7 +308,7 @@ func TestGetPhysicalSize_SparseFile(t *testing.T) {
 	}
 }
 
-func TestCloudDetector_InferOnlineOnlyFromSparseRatio(t *testing.T) {
+func TestCloudDetector_SparseRatioDoesNotProveOnlineOnly(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("sparse ratio simulation is flaky on windows in CI")
 	}
@@ -342,7 +342,7 @@ func TestCloudDetector_InferOnlineOnlyFromSparseRatio(t *testing.T) {
 	}
 
 	status := NewCloudDetector().inferStatusFromSize(path, info)
-	if status != models.CloudStatusOnlineOnly {
-		t.Fatalf("Expected simulated online-only status, got %s", status)
+	if status != models.CloudStatusUnknown {
+		t.Fatalf("Sparse ratio must remain unknown, got %s", status)
 	}
 }

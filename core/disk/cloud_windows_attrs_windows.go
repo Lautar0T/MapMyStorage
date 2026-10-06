@@ -27,15 +27,13 @@ func detectWindowsCloudState(path string, info os.FileInfo) (models.CloudStatus,
 		return models.CloudStatusUnknown, false
 	}
 
-	if attrs&fileAttributeRecallOnDataAccess != 0 || attrs&fileAttributeRecallOnOpen != 0 || attrs&windows.FILE_ATTRIBUTE_OFFLINE != 0 || attrs&fileAttributeUnpinned != 0 {
+	if attrs&fileAttributeRecallOnDataAccess != 0 || attrs&fileAttributeRecallOnOpen != 0 || attrs&windows.FILE_ATTRIBUTE_OFFLINE != 0 {
 		return models.CloudStatusOnlineOnly, true
 	}
 	if attrs&fileAttributePinned != 0 {
 		return models.CloudStatusLocal, true
 	}
 
-	if info.IsDir() {
-		return models.CloudStatusUnknown, true
-	}
-	return models.CloudStatusLocal, true
+	// Unpinned is an eviction policy, not evidence that data is absent.
+	return models.CloudStatusUnknown, false
 }

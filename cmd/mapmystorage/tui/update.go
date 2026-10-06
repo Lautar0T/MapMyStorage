@@ -20,10 +20,31 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
-		if key.Matches(msg, m.Keys.Quit) {
+		if msg.String() == "ctrl+c" || (!m.SearchMode && !m.ExportMode && key.Matches(msg, m.Keys.Quit)) {
+			if m.ScanCancel != nil {
+				m.ScanCancel()
+			}
 			return m, tea.Quit
 		}
 
+		if m.Diagnosis {
+			switch msg.String() {
+			case "esc", "d":
+				m.Diagnosis = false
+			case "down", "j":
+				m.DiagnosisOffset++
+			case "up", "k":
+				if m.DiagnosisOffset > 0 {
+					m.DiagnosisOffset--
+				}
+			case "pgdown", " ":
+				m.DiagnosisOffset += maxInt(1, m.Height-3)
+			case "pgup":
+				m.DiagnosisOffset = maxInt(0, m.DiagnosisOffset-maxInt(1, m.Height-3))
+			}
+			m.clampDiagnosisOffset()
+			return m, nil
+		}
 		if m.SearchMode {
 			return m.handleSearchKey(msg)
 		}
@@ -104,6 +125,9 @@ func (m AppModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 func (m AppModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch {
+	case msg.String() == "d":
+		m.Diagnosis = true
+		m.DiagnosisOffset = 0
 	case key.Matches(msg, m.Keys.Up):
 		if m.Cursor > 0 {
 			m.Cursor--
@@ -119,6 +143,21 @@ func (m AppModel) handleNormalKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case key.Matches(msg, m.Keys.Enter):
 		if selected := m.GetSelected(); selected != nil {
 			if selected.Type == models.EntryTypeDir {
+				if selected.CountedElsewhere != "" {
+					if original := models.FindEntry(m.Root, selected.CountedElsewhere); original != nil {
+						selected = original
+					} else {
+						m.SetMessage("Counted at " + selected.CountedElsewhere)
+						return m, nil
+					}
+				}
+				if selected.Summarized {
+					cfg := m.Config
+					cfg.RootPath = selected.Path
+					cfg.WholeDisk = false
+					m.Scanning = true
+					return m, tea.Batch(m.Spinner.Tick, StartScan(cfg))
+				}
 				m.EnterDir(selected)
 			} else {
 				if err := RevealInFileManager(selected.Path); err != nil {
@@ -220,7 +259,8 @@ func (m AppModel) handleSearchKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case tea.KeyBackspace:
 		if len(m.SearchQuery) > 0 {
-			m.SearchQuery = m.SearchQuery[:len(m.SearchQuery)-1]
+			runes := []rune(m.SearchQuery)
+			m.SearchQuery = string(runes[:len(runes)-1])
 			m.SearchResults = m.Search(m.SearchQuery)
 		}
 
@@ -256,13 +296,7 @@ func (m AppModel) handleExportKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 func (m *AppModel) adjustOffset() {
-	listHeight := m.Height - 12
-	if m.ShowSummary {
-		listHeight -= 8
-	}
-	if listHeight < 5 {
-		listHeight = 5
-	}
+	listHeight := m.computeListHeight()
 
 	if m.Cursor < m.Offset {
 		m.Offset = m.Cursor

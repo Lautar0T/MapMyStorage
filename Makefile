@@ -4,7 +4,9 @@ BINARY_NAME := mapmystorage
 CMD_DIR := ./cmd/mapmystorage
 BUILD_DIR := bin
 DIST_DIR := dist
-VERSION ?= 0.2.0
+VERSION ?= 0.3.0-dev
+PREFIX ?= $(HOME)/.local
+INSTALL_DIR ?= $(PREFIX)/bin
 LDFLAGS := -s -w -X main.version=$(VERSION)
 
 PLATFORMS := darwin/amd64 darwin/arm64 linux/amd64 windows/amd64
@@ -29,9 +31,9 @@ build: fmt vet
 	go build -ldflags "$(LDFLAGS)" -o $(BUILD_DIR)/$(BINARY_NAME) $(CMD_DIR)
 
 ## build-all: Build binaries for supported platforms
-build-all: clean
+build-all:
 	@mkdir -p $(BUILD_DIR)
-	@for platform in $(PLATFORMS); do \
+	@set -e; for platform in $(PLATFORMS); do \
 		GOOS=$$(echo $$platform | cut -d/ -f1); \
 		GOARCH=$$(echo $$platform | cut -d/ -f2); \
 		OUTPUT=$(BUILD_DIR)/$(BINARY_NAME)-$$GOOS-$$GOARCH; \
@@ -69,13 +71,14 @@ lint:
 		echo "golangci-lint not installed; skipping"; \
 	fi
 
-## install: Install the binary to /usr/local/bin
+## install: Install to ~/.local/bin (override INSTALL_DIR or PREFIX)
 install: build
-	install -m 0755 $(BUILD_DIR)/$(BINARY_NAME) /usr/local/bin/$(BINARY_NAME)
+	install -d "$(INSTALL_DIR)"
+	install -m 0755 "$(BUILD_DIR)/$(BINARY_NAME)" "$(INSTALL_DIR)/$(BINARY_NAME)"
 
-## uninstall: Remove the binary from /usr/local/bin
+## uninstall: Remove the binary from INSTALL_DIR
 uninstall:
-	rm -f /usr/local/bin/$(BINARY_NAME)
+	rm -f "$(INSTALL_DIR)/$(BINARY_NAME)"
 
 ## run: Build and run the binary
 run: build

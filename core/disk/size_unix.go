@@ -14,17 +14,11 @@ import (
 func GetPhysicalSize(path string, info os.FileInfo) (int64, error) {
 	stat, ok := info.Sys().(*syscall.Stat_t)
 	if !ok {
-		return info.Size(), nil
+		return 0, fmt.Errorf("allocated blocks unavailable for %s", path)
 	}
 
 	// st_blocks is the number of 512-byte blocks allocated
 	physicalSize := stat.Blocks * 512
-
-	// Handle inline data or small files
-	if physicalSize == 0 && stat.Size > 0 {
-		// Estimate metadata overhead
-		return estimateMetadataSizeUnix(stat.Size), nil
-	}
 
 	return physicalSize, nil
 }
@@ -41,22 +35,6 @@ func GetClusterSize(path string) (int64, error) {
 		return 0, fmt.Errorf("failed to statfs: %w", err)
 	}
 	return int64(stat.Bsize), nil
-}
-
-// estimateMetadataSizeUnix estimates metadata overhead for small files.
-func estimateMetadataSizeUnix(logicalSize int64) int64 {
-	if logicalSize == 0 {
-		return 0
-	}
-
-	// Estimate based on typical ext4/xfs inode size
-	const typicalInodeSize = 256
-
-	if logicalSize < typicalInodeSize {
-		return logicalSize + 64
-	}
-
-	return typicalInodeSize
 }
 
 // IsSparseFile checks if a file is sparse.

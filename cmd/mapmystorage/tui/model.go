@@ -22,7 +22,10 @@ import (
 
 // AppModel represents the state of the TUI application.
 type AppModel struct {
-	Config Config
+	Config          Config
+	ScanCancel      context.CancelFunc
+	Diagnosis       bool
+	DiagnosisOffset int
 
 	Root        *models.Entry
 	CurrentDir  *models.Entry
@@ -60,11 +63,14 @@ type AppModel struct {
 
 // Config holds TUI-specific configuration.
 type Config struct {
-	RootPath        string
-	FollowSymlinks  bool
-	ExcludePatterns []string
-	MaxDepth        int
-	ShowHidden      bool
+	CrossFilesystems bool
+	WholeDisk        bool
+	Context          context.Context
+	RootPath         string
+	FollowSymlinks   bool
+	ExcludePatterns  []string
+	MaxDepth         int
+	ShowHidden       bool
 }
 
 // KeyMap defines key bindings for the TUI.
@@ -154,12 +160,15 @@ func DefaultKeyMap() KeyMap {
 
 // NewAppModel creates a new TUI model.
 func NewAppModel(config Config) AppModel {
+	ctx, cancel := context.WithCancel(context.Background())
+	config.Context = ctx
 	s := spinner.New()
 	s.Spinner = spinner.Dot
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
 	return AppModel{
 		Config:      config,
+		ScanCancel:  cancel,
 		Scanning:    true,
 		Spinner:     s,
 		ShowHidden:  config.ShowHidden,
@@ -203,10 +212,15 @@ func StartScan(config Config) tea.Cmd {
 			MaxDepth:         config.MaxDepth,
 			ShowHidden:       true,
 			IncludeCloudInfo: true,
+			CrossFilesystems: config.CrossFilesystems, WholeDisk: config.WholeDisk,
 		}
 
 		scanner := disk.NewScanner(scanConfig)
-		ch, err := scanner.ScanAsync(context.Background())
+		ctx := config.Context
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		ch, err := scanner.ScanAsync(ctx)
 		return scanChannelMsg{Channel: ch, Err: err}
 	}
 }
@@ -429,7 +443,7 @@ func FormatBytes(b int64) string {
 		div *= unit
 		exp++
 	}
-	return fmt.Sprintf("%.1f %cB", float64(b)/float64(div), "KMGTPE"[exp])
+	return fmt.Sprintf("%.1f %ciB", float64(b)/float64(div), "KMGTPE"[exp])
 }
 
 // EntryTypeIcon returns icon for entry kind.
@@ -468,6 +482,21 @@ func EntrySizeColor(size int64, isPlaceholder bool) lipgloss.Color {
 
 // EntryStatusIndicator returns status text for cloud/compression/sparse indicators.
 func EntryStatusIndicator(entry *models.Entry) string {
+	if entry.ScanError != "" {
+		return "error"
+	}
+	if entry.Skipped != "" {
+		return "skipped"
+	}
+	if entry.CountedElsewhere != "" {
+		return "counted"
+	}
+	if entry.Incomplete {
+		return "partial"
+	}
+	if entry.Summarized {
+		return "summary"
+	}
 	if entry.IsCloud {
 		switch entry.CloudStatus {
 		case models.CloudStatusOnlineOnly:
@@ -483,11 +512,8 @@ func EntryStatusIndicator(entry *models.Entry) string {
 		}
 	}
 
-	if entry.IsCompressed() {
-		return "compressed"
-	}
 	if entry.IsSparse() {
-		return "sparse"
+		return "low alloc."
 	}
 	return "local"
 }

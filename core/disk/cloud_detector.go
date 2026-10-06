@@ -3,7 +3,6 @@ package disk
 
 import (
 	"os"
-	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -32,100 +31,44 @@ func (cd *CloudDetector) DetectCloudStatus(path string, info os.FileInfo) (model
 	}
 }
 
-// detectMacOS detects cloud files on macOS using extended attributes.
+// detectMacOS uses File Provider paths and Darwin's dataless flag. A low
+// allocation ratio alone cannot distinguish a sparse file from a placeholder.
 func (cd *CloudDetector) detectMacOS(path string, info os.FileInfo) (models.CloudProvider, models.CloudStatus, error) {
-	// Check for iCloud
-	if cd.hasXattrMacOS(path, "com.apple.icloud.itemName") {
-		// Check availability
-		status := models.CloudStatusLocal
-		if cd.hasXattrMacOS(path, "com.apple.availability") {
-			// This is a placeholder, we need to check the actual attribute value
-			// For now, assume online-only if the physical size is very small
-			if info.Size() > 0 {
-				physicalSize, _ := GetPhysicalSize(path, info)
-				if physicalSize < 1024 && info.Size() > 1024 {
-					status = models.CloudStatusOnlineOnly
-				}
-			}
+	provider := GetCloudProviderFromPath(path)
+	if isDataless(info) {
+		if provider == models.CloudProviderNone {
+			provider = models.CloudProviderUnknown
 		}
-		return models.CloudProviderICloud, status, nil
+		return provider, models.CloudStatusOnlineOnly, nil
 	}
-
-	// Check for Dropbox
-	if cd.hasXattrMacOS(path, "com.dropbox.attributes") ||
-		cd.hasXattrMacOS(path, "com.dropbox.attrs") {
-		return models.CloudProviderDropbox, models.CloudStatusUnknown, nil
+	if provider != models.CloudProviderNone {
+		return provider, cd.inferStatusFromSize(path, info), nil
 	}
-
-	// Check for OneDrive
-	if cd.hasXattrMacOS(path, "com.microsoft.OneDrive.ExtendedProperties") ||
-		cd.hasXattrMacOS(path, "com.microsoft.OneDrive.StreamingAttributes") {
-		return models.CloudProviderOneDrive, models.CloudStatusUnknown, nil
-	}
-
-	// Check for Google Drive (if available)
-	if cd.hasXattrMacOS(path, "com.google.drivefs") {
-		return models.CloudProviderGoogleDrive, models.CloudStatusUnknown, nil
-	}
-
 	return models.CloudProviderNone, models.CloudStatusLocal, nil
 }
 
-// detectWindows detects cloud files on Windows using file attributes.
+// detectWindows combines provider path hints with explicit placeholder attributes.
 func (cd *CloudDetector) detectWindows(path string, info os.FileInfo) (models.CloudProvider, models.CloudStatus, error) {
-	lowerPath := strings.ToLower(path)
-	statusFromAttrs, hasAttrSignal := detectWindowsCloudState(path, info)
-
-	// Check if in OneDrive folder
-	if strings.Contains(lowerPath, "\\onedrive") || strings.Contains(lowerPath, "/onedrive") {
-		if hasAttrSignal {
-			return models.CloudProviderOneDrive, statusFromAttrs, nil
+	provider := GetCloudProviderFromPath(path)
+	status, signal := detectWindowsCloudState(path, info)
+	if signal {
+		if provider == models.CloudProviderNone {
+			provider = models.CloudProviderUnknown
 		}
-		return models.CloudProviderOneDrive, cd.inferStatusFromSize(path, info), nil
+		return provider, status, nil
 	}
-
-	// Check if in Dropbox folder
-	if strings.Contains(lowerPath, "\\dropbox") || strings.Contains(lowerPath, "/dropbox") {
-		return models.CloudProviderDropbox, cd.inferStatusFromSize(path, info), nil
+	if provider != models.CloudProviderNone {
+		return provider, cd.inferStatusFromSize(path, info), nil
 	}
-
-	// Check if in Google Drive folder
-	if strings.Contains(lowerPath, "\\google drive") || strings.Contains(lowerPath, "/google drive") ||
-		strings.Contains(lowerPath, "\\my drive") || strings.Contains(lowerPath, "/my drive") {
-		return models.CloudProviderGoogleDrive, cd.inferStatusFromSize(path, info), nil
-	}
-
-	// Check if in iCloud Drive folder (rare on Windows but possible)
-	if strings.Contains(lowerPath, "\\icloud drive") || strings.Contains(lowerPath, "/icloud drive") {
-		return models.CloudProviderICloud, cd.inferStatusFromSize(path, info), nil
-	}
-
-	if hasAttrSignal {
-		// Attributes indicate a cloud placeholder/local state even if the folder
-		// name does not include provider branding.
-		return models.CloudProviderUnknown, statusFromAttrs, nil
-	}
-
 	return models.CloudProviderNone, models.CloudStatusLocal, nil
 }
 
-// detectGeneric uses heuristics for other platforms.
+// detectGeneric identifies provider paths but does not claim a sync state.
 func (cd *CloudDetector) detectGeneric(path string, info os.FileInfo) (models.CloudProvider, models.CloudStatus, error) {
-	// Use path-based detection
-	lowerPath := strings.ToLower(path)
-
-	if strings.Contains(lowerPath, "/dropbox/") || strings.Contains(lowerPath, "\\dropbox\\") {
-		return models.CloudProviderDropbox, cd.inferStatusFromSize(path, info), nil
+	provider := GetCloudProviderFromPath(path)
+	if provider != models.CloudProviderNone {
+		return provider, cd.inferStatusFromSize(path, info), nil
 	}
-
-	if strings.Contains(lowerPath, "/onedrive/") || strings.Contains(lowerPath, "\\onedrive\\") {
-		return models.CloudProviderOneDrive, cd.inferStatusFromSize(path, info), nil
-	}
-
-	if strings.Contains(lowerPath, "/google drive/") || strings.Contains(lowerPath, "\\google drive\\") {
-		return models.CloudProviderGoogleDrive, cd.inferStatusFromSize(path, info), nil
-	}
-
 	return models.CloudProviderNone, models.CloudStatusLocal, nil
 }
 
@@ -146,12 +89,7 @@ func (cd *CloudDetector) inferStatusFromSize(path string, info os.FileInfo) mode
 		return models.CloudStatusUnknown
 	}
 
-	// If physical size is less than 1% of logical size, it's likely online-only
-	if physicalSize < logicalSize/100 {
-		return models.CloudStatusOnlineOnly
-	}
-
-	// If physical size is close to logical size, it's local
+	// Allocation supports a local hint, not a guarantee of synchronization.
 	if physicalSize >= logicalSize*95/100 {
 		return models.CloudStatusLocal
 	}
@@ -180,40 +118,27 @@ func (cd *CloudDetector) IsCloudPlaceholder(path string, info os.FileInfo) bool 
 
 // GetCloudProviderFromPath attempts to identify cloud provider from the path.
 func GetCloudProviderFromPath(path string) models.CloudProvider {
-	lowerPath := strings.ToLower(path)
-	base := filepath.Base(lowerPath)
-
-	if strings.Contains(base, "icloud") {
-		return models.CloudProviderICloud
-	}
-	if strings.Contains(base, "dropbox") {
-		return models.CloudProviderDropbox
-	}
-	if strings.Contains(base, "onedrive") {
-		return models.CloudProviderOneDrive
-	}
-	if strings.Contains(base, "google drive") || strings.Contains(base, "google-drive") {
-		return models.CloudProviderGoogleDrive
-	}
-
-	// Check parent directories
-	dir := filepath.Dir(lowerPath)
-	for dir != "/" && dir != "." {
-		base = filepath.Base(dir)
-		if strings.Contains(base, "icloud") {
+	parts := strings.Split(strings.ReplaceAll(strings.ToLower(path), `\`, "/"), "/")
+	for i, part := range parts {
+		// Client databases/caches are local application data, not synced files.
+		// Stop only before reaching a provider root (a user may sync a folder named Caches).
+		if part == "application support" || part == "caches" || part == "containers" || part == "group containers" {
+			return models.CloudProviderNone
+		}
+		// Match provider directory components, never arbitrary substrings in filenames.
+		if i == len(parts)-1 && strings.Contains(part, ".") {
+			continue
+		}
+		switch {
+		case part == "dropbox" || strings.HasPrefix(part, "dropbox (") || strings.HasPrefix(part, "dropbox-"):
+			return models.CloudProviderDropbox
+		case part == "onedrive" || strings.HasPrefix(part, "onedrive-") || strings.HasPrefix(part, "onedrive - "):
+			return models.CloudProviderOneDrive
+		case part == "google drive" || strings.HasPrefix(part, "googledrive-") || part == "google-drive":
+			return models.CloudProviderGoogleDrive
+		case part == "com~apple~clouddocs" || part == "icloud drive":
 			return models.CloudProviderICloud
 		}
-		if strings.Contains(base, "dropbox") {
-			return models.CloudProviderDropbox
-		}
-		if strings.Contains(base, "onedrive") {
-			return models.CloudProviderOneDrive
-		}
-		if strings.Contains(base, "google drive") || strings.Contains(base, "google-drive") {
-			return models.CloudProviderGoogleDrive
-		}
-		dir = filepath.Dir(dir)
 	}
-
 	return models.CloudProviderNone
 }

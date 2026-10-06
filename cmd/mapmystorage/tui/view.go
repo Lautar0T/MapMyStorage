@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/lautar0t/MapMyStorage/core/models"
+	"github.com/lautar0t/MapMyStorage/core/report"
 )
 
 // View renders the TUI.
@@ -20,6 +21,9 @@ func (m AppModel) View() string {
 	}
 	if m.ScanError != nil {
 		return m.renderErrorView()
+	}
+	if m.Diagnosis {
+		return m.renderDiagnosis()
 	}
 	if m.ExportMode {
 		return m.renderExportView()
@@ -71,7 +75,7 @@ func (m AppModel) renderMainView() string {
 		return ""
 	}
 
-	parts := []string{m.renderHeader()}
+	parts := []string{m.renderHeader(), m.renderCoverage()}
 	if m.SearchMode {
 		parts = append(parts, m.renderSearchBar())
 	}
@@ -130,7 +134,7 @@ func (m AppModel) renderHeader() string {
 	breadcrumb := strings.Join(crumbs, " / ")
 	stats := ""
 	if m.CurrentDir != nil {
-		stats = fmt.Sprintf("Real: %s | Logical: %s", FormatBytes(m.CurrentDir.TotalPhysicalSize()), FormatBytes(m.CurrentDir.TotalLogicalSize()))
+		stats = fmt.Sprintf("Allocated: %s | Logical: %s", FormatBytes(m.CurrentDir.TotalPhysicalSize()), FormatBytes(m.CurrentDir.TotalLogicalSize()))
 	}
 
 	line := fmt.Sprintf("%s  %s", breadcrumb, stats)
@@ -153,15 +157,11 @@ func (m AppModel) renderFileList() string {
 	listHeight := m.computeListHeight()
 	lines := make([]string, 0, listHeight+2)
 
-	header := fmt.Sprintf("%-34s %-4s %10s %10s %6s %-12s %-16s",
-		truncate("Name", 34),
-		"Type",
-		"Real",
-		"Logical",
-		"Ratio",
-		"Status",
-		"Modified",
-	)
+	primary, secondary := "Allocated", "Logical"
+	if m.ShowLogical {
+		primary, secondary = secondary, primary
+	}
+	header := m.tableRow("Name", "Type", primary, secondary, "Ratio", "Status", "Modified")
 	lines = append(lines, lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#CFD8DC")).Render(header))
 	lines = append(lines, strings.Repeat("─", maxInt(20, m.Width)))
 
@@ -190,7 +190,8 @@ func (m AppModel) renderEntry(entry *models.Entry, selected bool) string {
 	if entry.Type == models.EntryTypeDir {
 		name += "/"
 	}
-	nameWithIcon := fmt.Sprintf("%s %s", EntryTypeIcon(entry), truncate(name, 31))
+	nameWidth := m.nameColumnWidth()
+	nameWithIcon := fmt.Sprintf("%s %s", EntryTypeIcon(entry), truncate(name, maxInt(1, nameWidth-3)))
 
 	primaryReal := entry.PhysicalSize
 	secondaryLogical := entry.LogicalSize
@@ -203,15 +204,7 @@ func (m AppModel) renderEntry(entry *models.Entry, selected bool) string {
 	status := truncate(EntryStatusIndicator(entry), 12)
 	mod := entry.ModTime.Format("2006-01-02 15:04")
 
-	line := fmt.Sprintf("%-34s %-4s %10s %10s %6s %-12s %-16s",
-		nameWithIcon,
-		entryTypeShort(entry.Type),
-		FormatBytes(primaryReal),
-		FormatBytes(secondaryLogical),
-		ratio,
-		status,
-		mod,
-	)
+	line := m.tableRow(nameWithIcon, entryTypeShort(entry.Type), FormatBytes(primaryReal), FormatBytes(secondaryLogical), ratio, status, mod)
 
 	placeholder := entry.CloudStatus == models.CloudStatusOnlineOnly || entry.PhysicalSize == 0
 	sizeColor := EntrySizeColor(entry.PhysicalSize, placeholder)
@@ -277,11 +270,20 @@ func (m AppModel) renderSummaryPanel() string {
 func (m AppModel) renderFooter() string {
 	parts := make([]string, 0, 8)
 	if selected := m.GetSelected(); selected != nil {
-		info := fmt.Sprintf("%s | %s | %s", selected.Type, selected.ModTime.Format("2006-01-02 15:04"), formatPermissions(selected.Permissions))
+		info := fmt.Sprintf("%s | %s", selected.Path, selected.CloudProvider)
+		if selected.ScanError != "" {
+			info += " | " + selected.ScanError
+		}
+		if selected.Skipped != "" {
+			info += " | " + selected.Skipped
+		}
+		if selected.CountedElsewhere != "" {
+			info += " | counted at " + selected.CountedElsewhere
+		}
 		parts = append(parts, info)
 	}
 
-	sortName := "Real"
+	sortName := "Allocated"
 	switch m.SortBy {
 	case models.SortByLogicalSize:
 		sortName = "Logical"
@@ -298,15 +300,19 @@ func (m AppModel) renderFooter() string {
 	}
 	parts = append(parts, fmt.Sprintf("Sort: %s %s", sortName, order))
 	parts = append(parts, fmt.Sprintf("Hidden: %t", m.ShowHidden))
-	parts = append(parts, fmt.Sprintf("Mode: %s", map[bool]string{true: "logical", false: "real"}[m.ShowLogical]))
-	parts = append(parts, fmt.Sprintf("Summary: %t", m.ShowSummary))
-	parts = append(parts, "Keys: s / h l v o t y e q")
 
-	return footerStyle.Width(maxInt(0, m.Width)).Render(strings.Join(parts, " | "))
+	parts = append(parts, "Keys: s / h l v d o t y e q")
+
+	if len(parts) == 0 {
+		return ""
+	}
+	first := truncate(parts[0], maxInt(1, m.Width-2))
+	rest := truncate(strings.Join(parts[1:], " | "), maxInt(1, m.Width-2))
+	return footerStyle.Render(first + "\n" + rest)
 }
 
 func (m AppModel) computeListHeight() int {
-	height := m.Height - 10
+	height := m.Height - 11
 	if m.SearchMode {
 		height--
 	}
@@ -336,13 +342,29 @@ func truncate(s string, maxLen int) string {
 	if maxLen <= 0 {
 		return ""
 	}
-	if len(s) <= maxLen {
+	runes := []rune(s)
+	if len(runes) <= maxLen {
 		return s
 	}
 	if maxLen <= 3 {
-		return s[:maxLen]
+		return string(runes[:maxLen])
 	}
-	return s[:maxLen-3] + "..."
+	return string(runes[:maxLen-3]) + "..."
+}
+
+func (m AppModel) nameColumnWidth() int {
+	overhead := 49
+	if m.Width >= 110 {
+		overhead += 17
+	}
+	return maxInt(10, minInt(48, m.Width-overhead))
+}
+func (m AppModel) tableRow(name, kind, allocated, logical, ratio, status, modified string) string {
+	line := fmt.Sprintf("%-*s %4s %11s %11s %6s %-12s", m.nameColumnWidth(), name, kind, allocated, logical, ratio, status)
+	if m.Width >= 110 {
+		line += " " + modified
+	}
+	return line
 }
 
 func getName(path string) string {
@@ -390,4 +412,42 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func (m AppModel) renderCoverage() string {
+	if m.Root == nil || m.Root.Report == nil {
+		return ""
+	}
+	r := m.Root.Report
+	coverage := "Measured accessible paths"
+	if m.Root.Incomplete {
+		coverage = "PARTIAL scan"
+	}
+	line := fmt.Sprintf("%s | %d errors | %d skipped | d: diagnosis", coverage, r.Errors, r.Skipped)
+	if r.Volume != nil {
+		line += " | Available: " + FormatBytes(r.Volume.Available)
+	}
+	return truncate(line, maxInt(1, m.Width))
+}
+func (m *AppModel) clampDiagnosisOffset() {
+	if m.Root == nil {
+		m.DiagnosisOffset = 0
+		return
+	}
+	lines := strings.Split(report.Text(m.Root), "\n")
+	m.DiagnosisOffset = minInt(m.DiagnosisOffset, maxInt(0, len(lines)-maxInt(1, m.Height-3)))
+}
+func (m AppModel) renderDiagnosis() string {
+	if m.Root == nil {
+		return "No scan available. Esc to close."
+	}
+	lines := strings.Split(report.Text(m.Root), "\n")
+	height := maxInt(1, m.Height-3)
+	start := minInt(m.DiagnosisOffset, maxInt(0, len(lines)-height))
+	end := minInt(len(lines), start+height)
+	visible := make([]string, 0, end-start)
+	for _, line := range lines[start:end] {
+		visible = append(visible, truncate(line, maxInt(1, m.Width)))
+	}
+	return "Disk diagnosis | arrows/PgUp/PgDn: scroll | Esc/d: close\n" + strings.Join(visible, "\n")
 }

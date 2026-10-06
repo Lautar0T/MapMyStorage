@@ -64,6 +64,7 @@ func ExportCSV(entry *models.Entry, w io.Writer, opts ExportOptions) error {
 		"cloud_provider",
 		"cloud_status",
 		"mod_time",
+		"incomplete", "scan_error", "skipped", "counted_elsewhere", "summarized",
 	}
 	if err := writer.Write(headers); err != nil {
 		return fmt.Errorf("failed to write CSV header: %w", err)
@@ -108,6 +109,7 @@ func ExportCSV(entry *models.Entry, w io.Writer, opts ExportOptions) error {
 			record.CloudProvider,
 			record.CloudStatus,
 			record.ModTime.Format(time.RFC3339),
+			formatBool(e.Incomplete), e.ScanError, e.Skipped, e.CountedElsewhere, formatBool(e.Summarized),
 		}
 
 		return writer.Write(row)
@@ -117,7 +119,8 @@ func ExportCSV(entry *models.Entry, w io.Writer, opts ExportOptions) error {
 		return fmt.Errorf("failed to write CSV data: %w", err)
 	}
 
-	return nil
+	writer.Flush()
+	return writer.Error()
 }
 
 // ExportSummary exports a summary of the scan.
